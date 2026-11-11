@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>한중 통역</title>
+<style>
+  :root{--bg:#0f1115;--panel:#181b22;--line:#2a2f3a;--text:#eef1f6;--muted:#8b93a3;--ko:#3b82f6;--zh:#ef4444;--ok:#22c55e}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","PingFang SC","Noto Sans SC",sans-serif}
+  body{display:flex;flex-direction:column;height:100dvh;padding-top:env(safe-area-inset-top)}
+  header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--line)}
+  header h1{font-size:16px;margin:0}
+  .hb{display:flex;gap:6px}
+  .chip{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:999px;padding:6px 10px;font-size:12px}
+  .chip.on{border-color:var(--ok);color:var(--ok)}
+  #status{font-size:13px;color:var(--muted);padding:6px 14px;min-height:28px}
+  #log{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+  .msg{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px;max-width:92%}
+  .msg.ko{align-self:flex-start;border-left:4px solid var(--ko)}
+  .msg.zh{align-self:flex-end;border-right:4px solid var(--zh)}
+  .src{font-size:13px;color:var(--muted);margin-bottom:6px;white-space:pre-wrap}
+  .dst{font-size:21px;line-height:1.4;font-weight:600;white-space:pre-wrap}
+  .py{font-size:13px;color:#fbbf24;margin-top:4px}
+  .play{background:none;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:4px 8px;font-size:13px;margin-top:6px}
+  .partial{opacity:.6;font-style:italic}
+  .empty{color:var(--muted);text-align:center;margin:auto;font-size:14px;line-height:1.8;padding:20px}
+  footer{border-top:1px solid var(--line);padding:10px 12px calc(10px + env(safe-area-inset-bottom))}
+  .mics{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .mic{border:none;border-radius:18px;padding:22px 8px;font-size:19px;font-weight:700;color:#fff;display:flex;flex-direction:column;align-items:center;gap:4px;touch-action:manipulation}
+  .mic small{font-size:12px;font-weight:500;opacity:.9}
+  .mic.ko{background:var(--ko)} .mic.zh{background:var(--zh)}
+  .mic.live{animation:pulse 1.1s infinite;filter:brightness(1.15)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.55)}70%{box-shadow:0 0 0 14px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
+  .typebar{display:flex;gap:8px;margin-top:10px}
+  .typebar input{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;font-size:16px}
+  .typebar button{background:var(--ok);border:none;color:#04110a;border-radius:12px;padding:0 16px;font-weight:700;font-size:15px}
+  body.face .msg.zh .dst,body.face .msg.zh .py{transform:rotate(180deg)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🇰🇷 한국어 ⇄ 中文 🇨🇳</h1>
+  <div class="hb">
+    <button class="chip on" id="autoSpeak">🔊 읽기</button>
+    <button class="chip" id="faceBtn">↕ 대면</button>
+    <button class="chip" id="clearBtn">지우기</button>
+  </div>
+</header>
+<div id="status">버튼을 누르고 말하세요</div>
+<div id="log"><div class="empty" id="empty">
+  🔵 한국어 버튼 → 한국어로 말하기<br>🔴 中文 按钮 → 说中文<br><br>
+  말이 끝나면 자동으로 번역하고 읽어줍니다.<br>说完后会自动翻译并朗读。
+</div></div>
+<footer>
+  <div class="mics">
+    <button class="mic ko" id="micKo">🎙 한국어<small>눌러서 말하기</small></button>
+    <button class="mic zh" id="micZh">🎙 中文<small>按下说话</small></button>
+  </div>
+  <form class="typebar" id="typeForm">
+    <input id="typeIn" placeholder="직접 입력 / 输入文字" autocomplete="off">
+    <button type="submit">번역</button>
+  </form>
+</footer>
+<script>
+const $ = s => document.querySelector(s);
+const log = $('#log');
+const setStatus = t => $('#status').textContent = t;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, active = null, finalText = '', partialEl = null;
+let autoSpeak = true;
+try { autoSpeak = localStorage.getItem('autoSpeak') !== '0'; } catch(e){}
+$('#autoSpeak').classList.toggle('on', autoSpeak);
+
+if (!SR) setStatus('⚠️ 이 브라우저는 음성인식 미지원 — Chrome(안드로이드) 또는 Safari(아이폰)로 여세요. 글자 입력은 가능.');
+
+function hideEmpty(){ const e = $('#empty'); if (e) e.remove(); }
+function btn(l){ return l === 'ko' ? $('#micKo') : $('#micZh'); }
+
+function resetBtns(){
+  ['ko','zh'].forEach(l => {
+    btn(l).classList.remove('live');
+    btn(l).querySelector('small').textContent = l === 'ko' ? '눌러서 말하기' : '按下说话';
+  });
+}
+
+function showPartial(t){
+  hideEmpty();
+  if (!partialEl){ partialEl = document.createElement('div'); partialEl.className = 'msg partial ' + active; log.appendChild(partialEl); }
+  partialEl.textContent = t || (active === 'ko' ? '듣는 중…' : '正在听…');
+  log.scrollTop = log.scrollHeight;
+}
+
+function startListen(lang){
+  if (!SR) { $('#typeIn').focus(); return; }
+  if (active) { // 말하는 중이면 다시 누를 때 종료
+    const same = active === lang;
+    try { rec.stop(); } catch(e){}
+    if (same) return;
+  }
+  try { speechSynthesis.cancel(); } catch(e){}
+  rec = new SR();
+  rec.lang = lang === 'ko' ? 'ko-KR' : 'zh-CN';
+  rec.interimResults = true;
+  rec.continuous = false;
+  rec.maxAlternatives = 1;
+  active = lang; finalText = ''; partialEl = null;
+  btn(lang).classList.add('live');
+  btn(lang).querySelector('small').textContent = lang === 'ko' ? '듣는 중… (누르면 끝)' : '正在听…(再按结束)';
+  setStatus(lang === 'ko' ? '🔴 한국어 듣는 중…' : '🔴 正在听中文…');
+  showPartial('');
+
+  rec.onresult = e => {
+    let interim = '', fin = '';
+    for (let i = 0; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) fin += r[0].transcript; else interim += r[0].transcript;
+    }
+    finalText = fin;
+    showPartial((fin + ' ' + interim).trim());
+  };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed')
+      setStatus('⚠️ 마이크 권한을 허용해주세요 (주소창 왼쪽 자물쇠 → 권한)');
+    else if (e.error === 'no-speech') setStatus('말소리가 안 들려요. 다시 눌러주세요.');
+    else if (e.error === 'language-not-supported') setStatus('⚠️ 이 기기에서 해당 언어 음성인식 미지원');
+    else setStatus('음성인식 오류: ' + e.error);
+  };
+  rec.onend = () => {
+    const lang0 = active;
+    const text = (finalText || (partialEl ? partialEl.textContent : '')).trim();
+    if (partialEl) { partialEl.remove(); partialEl = null; }
+    active = null; resetBtns();
+    if (text && !/^(듣는 중|正在听)/.test(text)) translate(text, lang0);
+  };
+  try { rec.start(); } catch(e) { setStatus('시작 실패: ' + e.message); active = null; resetBtns(); }
+}
+
+$('#micKo').addEventListener('click', () => startListen('ko'));
+$('#micZh').addEventListener('click', () => startListen('zh'));
+
+$('#typeForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = $('#typeIn').value.trim(); if (!v) return;
+  $('#typeIn').value = ''; $('#typeIn').blur();
+  const isKo = /[가-힣]/.test(v);
+  translate(v, isKo ? 'ko' : 'zh');
+});
+
+async function gtx(text, sl, tl){
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&dt=rm&sl=' + sl + '&tl=' + tl + '&q=' + encodeURIComponent(text);
+  const r = await fetch(url); if (!r.ok) throw new Error('google ' + r.status);
+  const j = await r.json();
+  let out = '', py = '';
+  for (const seg of j[0] || []) {
+    if (seg[0]) out += seg[0];
+    else if (seg[2] && tl.startsWith('zh')) py += seg[2];
+  }
+  return { text: out, pinyin: py };
+}
+async function mymemory(text, sl, tl){
+  const r = await fetch('https://api.mymemory.translated.net/get?langpair=' + sl + '|' + tl + '&q=' + encodeURIComponent(text));
+  const j = await r.json();
+  return { text: j.responseData.translatedText, pinyin: '' };
+}
+
+async function translate(text, from){
+  hideEmpty();
+  const to = from === 'ko' ? 'zh' : 'ko';
+  const card = document.createElement('div');
+  card.className = 'msg ' + from;
+  card.innerHTML = '<div class="src"></div><div class="dst">…</div>';
+  card.querySelector('.src').textContent = text;
+  log.appendChild(card); log.scrollTop = log.scrollHeight;
+  setStatus('⏳ 번역 중…');
+  const sl = from === 'ko' ? 'ko' : 'zh-CN', tl = to === 'ko' ? 'ko' : 'zh-CN';
+  let res;
+  try { res = await gtx(text, sl, tl); }
+  catch(e) { try { res = await mymemory(text, sl, tl); } catch(e2) { card.querySelector('.dst').textContent = '번역 실패 — 인터넷 연결 확인'; setStatus('번역 실패'); return; } }
+  card.querySelector('.dst').textContent = res.text;
+  if (res.pinyin) { const p = document.createElement('div'); p.className = 'py'; p.textContent = res.pinyin; card.appendChild(p); }
+  const b = document.createElement('button'); b.className = 'play'; b.textContent = '🔊 다시 듣기 / 再听';
+  b.onclick = () => speak(res.text, to); card.appendChild(b);
+  log.scrollTop = log.scrollHeight;
+  setStatus('✅ 완료 — 다음 사람 버튼을 누르세요');
+  if (autoSpeak) speak(res.text, to);
+}
+
+let voices = [];
+function loadVoices(){ try { voices = speechSynthesis.getVoices(); } catch(e){} }
+loadVoices(); try { speechSynthesis.onvoiceschanged = loadVoices; } catch(e){}
+
+function speak(text, lang){
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = lang === 'zh' ? 'zh-CN' : 'ko-KR';
+    const pref = lang === 'zh' ? ['zh-cn','zh_cn','cmn','zh'] : ['ko'];
+    const v = voices.find(v => pref.some(p => v.lang.toLowerCase().replace('_','-').startsWith(p)));
+    if (v) u.voice = v;
+    u.rate = 0.95;
+    speechSynthesis.speak(u);
+  } catch(e){}
+}
+
+$('#autoSpeak').onclick = () => { autoSpeak = !autoSpeak; $('#autoSpeak').classList.toggle('on', autoSpeak); try{localStorage.setItem('autoSpeak', autoSpeak?'1':'0')}catch(e){} };
+$('#faceBtn').onclick = () => { document.body.classList.toggle('face'); $('#faceBtn').classList.toggle('on'); };
+$('#clearBtn').onclick = () => { log.innerHTML = ''; };
+</script>
+</body>
+</html>
